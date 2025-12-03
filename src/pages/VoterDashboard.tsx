@@ -5,14 +5,14 @@ import { Vote, Calendar, Users, CheckCircle, Clock } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/hooks/useAuth";
-import { supabase } from "@/integrations/supabase/client";
+import { apiClient } from "@/integrations/api/client";
 import { MeshBackground } from "@/components/layout/MeshBackground";
 import { Header } from "@/components/layout/Header";
 import { format } from "date-fns";
 import { es } from "date-fns/locale";
 
 interface Poll {
-  id: string;
+  id: number;
   title: string;
   description: string | null;
   end_date: string;
@@ -21,7 +21,7 @@ interface Poll {
 }
 
 interface UserVote {
-  poll_id: string;
+  poll_id: number;
 }
 
 export default function VoterDashboard() {
@@ -54,36 +54,34 @@ export default function VoterDashboard() {
   }, [profile]);
 
   const fetchPolls = async () => {
-    const { data, error } = await supabase
-      .from("polls")
-      .select("*")
-      .eq("is_active", true)
-      .gte("end_date", new Date().toISOString());
-
-    if (!error && data) {
+    try {
+      setLoadingPolls(true);
+      const data = await apiClient.getPolls();
+      
       // Filter by age if user has age set
-      const filtered = data.filter((poll) => {
+      const filtered = data.filter((poll: Poll) => {
         if (!poll.min_age || !profile?.age) return true;
         return profile.age >= poll.min_age;
       });
       setPolls(filtered);
+    } catch (error) {
+      console.error("Error fetching polls:", error);
+    } finally {
+      setLoadingPolls(false);
     }
-    setLoadingPolls(false);
   };
 
   const fetchUserVotes = async () => {
     if (!profile) return;
-    const { data } = await supabase
-      .from("votes")
-      .select("poll_id")
-      .eq("user_id", profile.id);
-
-    if (data) {
+    try {
+      const data = await apiClient.getUserVotes();
       setUserVotes(data);
+    } catch (error) {
+      console.error("Error fetching user votes:", error);
     }
   };
 
-  const hasVoted = (pollId: string) => {
+  const hasVoted = (pollId: number) => {
     return userVotes.some((v) => v.poll_id === pollId);
   };
 
@@ -204,7 +202,7 @@ export default function VoterDashboard() {
                       className="w-full"
                       variant={hasVoted(poll.id) ? "secondary" : "default"}
                       disabled={hasVoted(poll.id)}
-                      onClick={() => navigate(`/vote/${poll.id}`)}
+                      onClick={() => navigate(`/vote/${poll.id.toString()}`)}
                     >
                       {hasVoted(poll.id) ? "Ya votaste" : "Votar ahora"}
                     </Button>

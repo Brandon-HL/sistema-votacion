@@ -83,7 +83,6 @@ export default function Auth() {
     const { error } = await signUp({
       dni: data.dni,
       password: data.password,
-      email: `${data.dni}@civicvote.local`,
       full_name: data.full_name,
       phone: data.phone,
       age: data.age,

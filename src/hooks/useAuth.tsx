@@ -1,7 +1,5 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from "react";
-import { User, Session } from "@supabase/supabase-js";
-import { supabase } from "@/integrations/supabase/client";
-import { useToast } from "@/hooks/use-toast";
+import { apiClient } from "@/integrations/api/client";
 
 type UserRole = "admin" | "supervisor" | "voter";
 type UserStatus = "pending" | "active" | "suspended";
@@ -19,8 +17,6 @@ interface Profile {
 }
 
 interface AuthContextType {
-  user: User | null;
-  session: Session | null;
   profile: Profile | null;
   loading: boolean;
   signIn: (dni: string, password: string) => Promise<{ error: Error | null }>;
@@ -31,7 +27,6 @@ interface AuthContextType {
 interface SignUpData {
   dni: string;
   password: string;
-  email: string;
   full_name: string;
   phone: string;
   age: number;
@@ -41,71 +36,44 @@ interface SignUpData {
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [user, setUser] = useState<User | null>(null);
-  const [session, setSession] = useState<Session | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [loading, setLoading] = useState(true);
-  const { toast } = useToast();
 
-  const fetchProfile = async (userId: string) => {
-    const { data, error } = await supabase
-      .from("profiles")
-      .select("*")
-      .eq("id", userId)
-      .maybeSingle();
-
-    if (error) {
+  const fetchProfile = async () => {
+    try {
+      const profileData = await apiClient.getProfile();
+      return profileData as Profile;
+    } catch (error) {
       console.error("Error fetching profile:", error);
       return null;
     }
-    return data as Profile | null;
   };
 
   useEffect(() => {
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(
-      (event, session) => {
-        setSession(session);
-        setUser(session?.user ?? null);
-        
-        if (session?.user) {
-          setTimeout(async () => {
-            const profileData = await fetchProfile(session.user.id);
-            setProfile(profileData);
-            setLoading(false);
-          }, 0);
-        } else {
-          setProfile(null);
-          setLoading(false);
-        }
-      }
-    );
-
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session);
-      setUser(session?.user ?? null);
-      
-      if (session?.user) {
-        fetchProfile(session.user.id).then((profileData) => {
-          setProfile(profileData);
-          setLoading(false);
-        });
-      } else {
+    // Verificar si hay un token almacenado
+    const token = localStorage.getItem('auth_token');
+    
+    if (token) {
+      // Intentar obtener el perfil con el token
+      fetchProfile().then((profileData) => {
+        setProfile(profileData);
         setLoading(false);
-      }
-    });
-
-    return () => subscription.unsubscribe();
+      }).catch(() => {
+        // Si falla, limpiar el token
+        localStorage.removeItem('auth_token');
+        apiClient.setToken(null);
+        setProfile(null);
+        setLoading(false);
+      });
+    } else {
+      setLoading(false);
+    }
   }, []);
 
   const signIn = async (dni: string, password: string) => {
     try {
-      const email = `${dni}@civicvote.local`;
-      const { error } = await supabase.auth.signInWithPassword({
-        email,
-        password,
-      });
-      
-      if (error) throw error;
+      const response = await apiClient.signIn(dni, password);
+      setProfile(response.user);
       return { error: null };
     } catch (error) {
       return { error: error as Error };
@@ -114,23 +82,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const signUp = async (data: SignUpData) => {
     try {
-      const email = `${data.dni}@civicvote.local`;
-      const { error } = await supabase.auth.signUp({
-        email,
-        password: data.password,
-        options: {
-          emailRedirectTo: `${window.location.origin}/`,
-          data: {
-            dni: data.dni,
-            full_name: data.full_name,
-            phone: data.phone,
-            age: data.age,
-            role: data.role,
-          },
-        },
-      });
-      
-      if (error) throw error;
+      await apiClient.signUp(data);
       return { error: null };
     } catch (error) {
       return { error: error as Error };
@@ -138,14 +90,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const signOut = async () => {
-    await supabase.auth.signOut();
-    setUser(null);
-    setSession(null);
+    apiClient.setToken(null);
     setProfile(null);
   };
 
   return (
-    <AuthContext.Provider value={{ user, session, profile, loading, signIn, signUp, signOut }}>
+    <AuthContext.Provider value={{ profile, loading, signIn, signUp, signOut }}>
       {children}
     </AuthContext.Provider>
   );

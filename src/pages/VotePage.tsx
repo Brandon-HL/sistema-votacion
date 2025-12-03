@@ -7,19 +7,19 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useAuth } from "@/hooks/useAuth";
-import { supabase } from "@/integrations/supabase/client";
+import { apiClient } from "@/integrations/api/client";
 import { MeshBackground } from "@/components/layout/MeshBackground";
 import { Header } from "@/components/layout/Header";
 import { useToast } from "@/hooks/use-toast";
 
 interface Poll {
-  id: string;
+  id: number;
   title: string;
   description: string | null;
 }
 
 interface Candidate {
-  id: string;
+  id: number;
   name: string;
   party: string;
   photo_url: string | null;
@@ -32,7 +32,7 @@ export default function VotePage() {
   const { profile, loading } = useAuth();
   const navigate = useNavigate();
   const { toast } = useToast();
-  
+
   const [poll, setPoll] = useState<Poll | null>(null);
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [selectedCandidate, setSelectedCandidate] = useState<Candidate | null>(null);
@@ -40,6 +40,7 @@ export default function VotePage() {
   const [successOpen, setSuccessOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [hasVoted, setHasVoted] = useState(false);
+  const [loadingData, setLoadingData] = useState(true);
 
   useEffect(() => {
     if (!loading && !profile) {
@@ -59,98 +60,91 @@ export default function VotePage() {
   }, [pollId, profile]);
 
   const fetchPollData = async () => {
-    const { data: pollData } = await supabase
-      .from("polls")
-      .select("*")
-      .eq("id", pollId)
-      .single();
-
-    if (pollData) {
+    if (!pollId) return;
+    try {
+      setLoadingData(true);
+      const pollData = await apiClient.getPollById(pollId);
       setPoll(pollData);
-    }
 
-    const { data: candidatesData } = await supabase
-      .from("candidates")
-      .select("*")
-      .eq("poll_id", pollId);
-
-    if (candidatesData) {
+      const candidatesData = await apiClient.getCandidatesByPoll(parseInt(pollId));
       setCandidates(candidatesData);
+    } catch (error) {
+      console.error("Error fetching poll data:", error);
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: "No se pudo cargar la información de la votación",
+      });
+    } finally {
+      setLoadingData(false);
     }
   };
 
   const checkIfVoted = async () => {
-    if (!profile) return;
-    const { data } = await supabase
-      .from("votes")
-      .select("id")
-      .eq("poll_id", pollId)
-      .eq("user_id", profile.id)
-      .maybeSingle();
-
-    if (data) {
-      setHasVoted(true);
+    if (!profile || !pollId) return;
+    try {
+      const votes = await apiClient.getUserVotes();
+      const pollIdNum = parseInt(pollId);
+      const hasVotedInThisPoll = votes.some((v) => v.poll_id === pollIdNum);
+      setHasVoted(hasVotedInThisPoll);
+    } catch (error) {
+      console.error("Error checking vote:", error);
     }
   };
 
   const handleVote = async () => {
     if (!selectedCandidate || !profile || !pollId) return;
-    
+
     setSubmitting(true);
-    const { error } = await supabase.from("votes").insert({
-      poll_id: pollId,
-      candidate_id: selectedCandidate.id,
-      user_id: profile.id,
-    });
+    try {
+      await apiClient.createVote(parseInt(pollId), selectedCandidate.id);
+      setConfirmOpen(false);
 
-    setSubmitting(false);
-    setConfirmOpen(false);
+      // Fire confetti!
+      const duration = 3 * 1000;
+      const animationEnd = Date.now() + duration;
+      const defaults = { startVelocity: 30, spread: 360, ticks: 60, zIndex: 9999 };
 
-    if (error) {
+      const randomInRange = (min: number, max: number) => Math.random() * (max - min) + min;
+
+      const interval = setInterval(() => {
+        const timeLeft = animationEnd - Date.now();
+
+        if (timeLeft <= 0) {
+          return clearInterval(interval);
+        }
+
+        const particleCount = 50 * (timeLeft / duration);
+
+        confetti({
+          ...defaults,
+          particleCount,
+          origin: { x: randomInRange(0.1, 0.3), y: Math.random() - 0.2 },
+          colors: ["#6366f1", "#a855f7", "#22d3ee", "#f472b6"],
+        });
+        confetti({
+          ...defaults,
+          particleCount,
+          origin: { x: randomInRange(0.7, 0.9), y: Math.random() - 0.2 },
+          colors: ["#6366f1", "#a855f7", "#22d3ee", "#f472b6"],
+        });
+      }, 250);
+
+      setSuccessOpen(true);
+    } catch (error: any) {
       toast({
         variant: "destructive",
         title: "Error al votar",
-        description: error.message.includes("unique") 
-          ? "Ya has votado en esta encuesta" 
-          : error.message,
+        description: error.message?.includes("Ya has votado")
+          ? "Ya has votado en esta encuesta"
+          : error.message || "Error al registrar tu voto",
       });
-      return;
+    } finally {
+      setSubmitting(false);
     }
-
-    // Fire confetti!
-    const duration = 3 * 1000;
-    const animationEnd = Date.now() + duration;
-    const defaults = { startVelocity: 30, spread: 360, ticks: 60, zIndex: 9999 };
-
-    const randomInRange = (min: number, max: number) => Math.random() * (max - min) + min;
-
-    const interval = setInterval(() => {
-      const timeLeft = animationEnd - Date.now();
-
-      if (timeLeft <= 0) {
-        return clearInterval(interval);
-      }
-
-      const particleCount = 50 * (timeLeft / duration);
-      
-      confetti({
-        ...defaults,
-        particleCount,
-        origin: { x: randomInRange(0.1, 0.3), y: Math.random() - 0.2 },
-        colors: ["#6366f1", "#a855f7", "#22d3ee", "#f472b6"],
-      });
-      confetti({
-        ...defaults,
-        particleCount,
-        origin: { x: randomInRange(0.7, 0.9), y: Math.random() - 0.2 },
-        colors: ["#6366f1", "#a855f7", "#22d3ee", "#f472b6"],
-      });
-    }, 250);
-
-    setSuccessOpen(true);
   };
 
-  if (loading || !poll) {
+  if (loading || loadingData || !poll) {
     return (
       <MeshBackground>
         <div className="min-h-screen flex items-center justify-center">
@@ -212,11 +206,10 @@ export default function VotePage() {
               >
                 <Card
                   variant="interactive"
-                  className={`h-full transition-all ${
-                    selectedCandidate?.id === candidate.id
+                  className={`h-full transition-all ${selectedCandidate?.id === candidate.id
                       ? "ring-2 ring-primary ring-offset-2 bg-primary/5"
                       : ""
-                  }`}
+                    }`}
                   onClick={() => setSelectedCandidate(candidate)}
                 >
                   <CardHeader className="text-center pb-2">

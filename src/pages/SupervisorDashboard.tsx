@@ -9,7 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { useAuth } from "@/hooks/useAuth";
-import { supabase } from "@/integrations/supabase/client";
+import { apiClient } from "@/integrations/api/client";
 import { MeshBackground } from "@/components/layout/MeshBackground";
 import { Header } from "@/components/layout/Header";
 import { useToast } from "@/hooks/use-toast";
@@ -18,7 +18,7 @@ import { es } from "date-fns/locale";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from "recharts";
 
 interface Poll {
-  id: string;
+  id: number;
   title: string;
   description: string | null;
   end_date: string;
@@ -27,8 +27,8 @@ interface Poll {
 }
 
 interface Candidate {
-  id: string;
-  poll_id: string;
+  id: number;
+  poll_id: number;
   name: string;
   party: string;
   photo_url: string | null;
@@ -37,7 +37,7 @@ interface Candidate {
 }
 
 interface VoteCount {
-  candidate_id: string;
+  candidate_id: number;
   candidate_name: string;
   count: number;
 }
@@ -48,18 +48,25 @@ export default function SupervisorDashboard() {
   const { profile, loading } = useAuth();
   const navigate = useNavigate();
   const { toast } = useToast();
-  
+
   const [polls, setPolls] = useState<Poll[]>([]);
   const [selectedPoll, setSelectedPoll] = useState<Poll | null>(null);
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [voteCounts, setVoteCounts] = useState<VoteCount[]>([]);
   const [loadingPolls, setLoadingPolls] = useState(true);
-  
+
   // Form states
   const [createPollOpen, setCreatePollOpen] = useState(false);
   const [addCandidateOpen, setAddCandidateOpen] = useState(false);
   const [newPoll, setNewPoll] = useState({ title: "", description: "", end_date: "", min_age: 18 });
-  const [newCandidate, setNewCandidate] = useState({ name: "", party: "", photo_url: "", age: 0, description: "" });
+  const [newCandidate, setNewCandidate] = useState<{
+    name: string;
+    party: string;
+    photo_url: string;
+    age: number;
+    description: string;
+    photo: File | null;
+  }>({ name: "", party: "", photo_url: "", age: 0, description: "", photo: null });
 
   useEffect(() => {
     if (!loading && !profile) {
@@ -88,7 +95,7 @@ export default function SupervisorDashboard() {
       navigate("/auth");
       return;
     }
-  }, [profile, loading, navigate]);
+  }, [profile, loading, navigate, toast]);
 
   useEffect(() => {
     if (profile) {
@@ -100,132 +107,141 @@ export default function SupervisorDashboard() {
     if (selectedPoll) {
       fetchCandidates(selectedPoll.id);
       fetchVoteCounts(selectedPoll.id);
-      
-      // Subscribe to realtime vote updates
-      const channel = supabase
-        .channel(`votes-${selectedPoll.id}`)
-        .on(
-          "postgres_changes",
-          { event: "INSERT", schema: "public", table: "votes", filter: `poll_id=eq.${selectedPoll.id}` },
-          () => {
-            fetchVoteCounts(selectedPoll.id);
-          }
-        )
-        .subscribe();
-
-      return () => {
-        supabase.removeChannel(channel);
-      };
     }
+  }, [selectedPoll]);
+
+  // Polling para actualizar conteos de votos cada 5 segundos
+  useEffect(() => {
+    if (!selectedPoll) return;
+
+    // Cargar inmediatamente
+    fetchVoteCounts(selectedPoll.id);
+
+    // Configurar polling cada 5 segundos
+    const interval = setInterval(() => {
+      fetchVoteCounts(selectedPoll.id);
+    }, 5000);
+
+    return () => clearInterval(interval);
   }, [selectedPoll]);
 
   const fetchPolls = async () => {
     if (!profile) return;
-    const { data, error } = await supabase
-      .from("polls")
-      .select("*")
-      .eq("created_by", profile.id)
-      .order("created_at", { ascending: false });
+    try {
+      setLoadingPolls(true);
+      const data = await apiClient.getPolls();
 
-    if (!error && data) {
-      setPolls(data);
-      if (data.length > 0 && !selectedPoll) {
-        setSelectedPoll(data[0]);
+      if (data) {
+        setPolls(data);
+        if (data.length > 0 && !selectedPoll) {
+          setSelectedPoll(data[0]);
+        }
       }
-    }
-    setLoadingPolls(false);
-  };
-
-  const fetchCandidates = async (pollId: string) => {
-    const { data } = await supabase
-      .from("candidates")
-      .select("*")
-      .eq("poll_id", pollId);
-
-    if (data) {
-      setCandidates(data);
+    } catch (error) {
+      console.error("Error fetching polls:", error);
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: "No se pudieron cargar las votaciones",
+      });
+    } finally {
+      setLoadingPolls(false);
     }
   };
 
-  const fetchVoteCounts = async (pollId: string) => {
-    const { data: votes } = await supabase
-      .from("votes")
-      .select("candidate_id")
-      .eq("poll_id", pollId);
+  const fetchCandidates = async (pollId: number) => {
+    try {
+      const data = await apiClient.getCandidatesByPoll(pollId);
+      if (data) {
+        setCandidates(data);
+      }
+    } catch (error) {
+      console.error("Error fetching candidates:", error);
+    }
+  };
 
-    const { data: candidatesData } = await supabase
-      .from("candidates")
-      .select("id, name")
-      .eq("poll_id", pollId);
-
-    if (votes && candidatesData) {
-      const counts = candidatesData.map((c) => ({
-        candidate_id: c.id,
-        candidate_name: c.name,
-        count: votes.filter((v) => v.candidate_id === c.id).length,
-      }));
-      setVoteCounts(counts);
+  const fetchVoteCounts = async (pollId: number) => {
+    try {
+      const data = await apiClient.getVoteCounts(pollId);
+      if (data) {
+        // Asegurar que candidate_id sea número
+        const formatted = data.map(v => ({
+          ...v,
+          candidate_id: typeof v.candidate_id === 'string' ? parseInt(v.candidate_id) : v.candidate_id
+        }));
+        setVoteCounts(formatted);
+      }
+    } catch (error) {
+      console.error("Error fetching vote counts:", error);
     }
   };
 
   const handleCreatePoll = async () => {
     if (!profile) return;
-    
-    const { error } = await supabase.from("polls").insert({
-      title: newPoll.title,
-      description: newPoll.description,
-      end_date: newPoll.end_date,
-      min_age: newPoll.min_age,
-      created_by: profile.id,
-    });
 
-    if (error) {
-      toast({ variant: "destructive", title: "Error", description: error.message });
-      return;
+    try {
+      await apiClient.createPoll({
+        title: newPoll.title,
+        description: newPoll.description,
+        closingDate: newPoll.end_date,
+        min_age: newPoll.min_age,
+      });
+
+      toast({ title: "Éxito", description: "Votación creada correctamente" });
+      setCreatePollOpen(false);
+      setNewPoll({ title: "", description: "", end_date: "", min_age: 18 });
+      fetchPolls();
+    } catch (error: any) {
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: error.message || "No se pudo crear la votación",
+      });
     }
-
-    toast({ title: "Éxito", description: "Votación creada correctamente" });
-    setCreatePollOpen(false);
-    setNewPoll({ title: "", description: "", end_date: "", min_age: 18 });
-    fetchPolls();
   };
 
   const handleAddCandidate = async () => {
     if (!selectedPoll) return;
-    
-    const { error } = await supabase.from("candidates").insert({
-      poll_id: selectedPoll.id,
-      name: newCandidate.name,
-      party: newCandidate.party,
-      photo_url: newCandidate.photo_url || null,
-      age: newCandidate.age || null,
-      description: newCandidate.description || null,
-    });
 
-    if (error) {
-      toast({ variant: "destructive", title: "Error", description: error.message });
-      return;
-    }
+    try {
+      const formData = new FormData();
+      formData.append('name', newCandidate.name);
+      formData.append('party', newCandidate.party);
+      if (newCandidate.age) formData.append('age', newCandidate.age.toString());
+      if (newCandidate.description) formData.append('description', newCandidate.description);
+      if (newCandidate.photo) formData.append('photo', newCandidate.photo);
 
-    toast({ title: "Éxito", description: "Candidato agregado correctamente" });
-    setAddCandidateOpen(false);
-    setNewCandidate({ name: "", party: "", photo_url: "", age: 0, description: "" });
-    fetchCandidates(selectedPoll.id);
-    fetchVoteCounts(selectedPoll.id);
-  };
+      await apiClient.createCandidate(selectedPoll.id, formData);
 
-  const handleDeleteCandidate = async (candidateId: string) => {
-    const { error } = await supabase.from("candidates").delete().eq("id", candidateId);
-    
-    if (error) {
-      toast({ variant: "destructive", title: "Error", description: error.message });
-      return;
-    }
-
-    toast({ title: "Candidato eliminado" });
-    if (selectedPoll) {
+      toast({ title: "Éxito", description: "Candidato agregado correctamente" });
+      setAddCandidateOpen(false);
+      setNewCandidate({ name: "", party: "", photo_url: "", age: 0, description: "", photo: null });
       fetchCandidates(selectedPoll.id);
       fetchVoteCounts(selectedPoll.id);
+    } catch (error: any) {
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: error.message || "No se pudo agregar el candidato",
+      });
+    }
+  };
+
+  const handleDeleteCandidate = async (candidateId: number) => {
+    try {
+      await apiClient.deleteCandidate(candidateId);
+
+      toast({ title: "Candidato eliminado" });
+      if (selectedPoll) {
+        fetchCandidates(selectedPoll.id);
+        fetchVoteCounts(selectedPoll.id);
+      }
+    } catch (error: any) {
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: error.message || "No se pudo eliminar el candidato",
+      });
     }
   };
 
@@ -453,9 +469,9 @@ export default function SupervisorDashboard() {
                     </div>
                     <Dialog open={addCandidateOpen} onOpenChange={setAddCandidateOpen}>
                       <DialogTrigger asChild>
-                        <Button size="sm">
-                          <UserPlus className="w-4 h-4 mr-2" />
-                          Agregar
+                        <Button size="sm" className="bg-primary hover:bg-primary/90">
+                          <Users className="w-4 h-4 mr-2" />
+                          Gestionar Candidatos
                         </Button>
                       </DialogTrigger>
                       <DialogContent className="glass-card border-white/60">
@@ -489,11 +505,16 @@ export default function SupervisorDashboard() {
                               />
                             </div>
                             <div className="space-y-2">
-                              <Label>URL de foto</Label>
+                              <Label>Foto</Label>
                               <Input
-                                value={newCandidate.photo_url}
-                                onChange={(e) => setNewCandidate({ ...newCandidate, photo_url: e.target.value })}
-                                placeholder="https://..."
+                                type="file"
+                                accept="image/*"
+                                onChange={(e) => {
+                                  const file = e.target.files?.[0];
+                                  if (file) {
+                                    setNewCandidate({ ...newCandidate, photo: file });
+                                  }
+                                }}
                               />
                             </div>
                           </div>

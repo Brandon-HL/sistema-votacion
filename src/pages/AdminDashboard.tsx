@@ -6,7 +6,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useAuth } from "@/hooks/useAuth";
-import { supabase } from "@/integrations/supabase/client";
+import { apiClient } from "@/integrations/api/client";
 import { MeshBackground } from "@/components/layout/MeshBackground";
 import { Header } from "@/components/layout/Header";
 import { useToast } from "@/hooks/use-toast";
@@ -14,7 +14,7 @@ import { format } from "date-fns";
 import { es } from "date-fns/locale";
 
 interface Profile {
-  id: string;
+  id: number;
   dni: string;
   full_name: string;
   phone: string | null;
@@ -25,13 +25,13 @@ interface Profile {
 }
 
 interface Poll {
-  id: string;
+  id: number;
   title: string;
   description: string | null;
   end_date: string;
   is_active: boolean;
-  created_by: string;
-  profiles?: { full_name: string } | null;
+  created_by: number;
+  creator_name?: string;
 }
 
 export default function AdminDashboard() {
@@ -61,70 +61,67 @@ export default function AdminDashboard() {
   }, [profile]);
 
   const fetchData = async () => {
-    // Fetch pending supervisors
-    const { data: pending } = await supabase
-      .from("profiles")
-      .select("*")
-      .eq("status", "pending")
-      .eq("role", "supervisor");
+    try {
+      setLoadingData(true);
+      
+      // Fetch pending supervisors
+      const pending = await apiClient.getPendingUsers();
+      setPendingUsers(pending as Profile[]);
 
-    if (pending) setPendingUsers(pending as Profile[]);
+      // Fetch all users (except current admin)
+      const users = await apiClient.getAllUsers();
+      setAllUsers(users as Profile[]);
 
-    // Fetch all users (except current admin)
-    const { data: users } = await supabase
-      .from("profiles")
-      .select("*")
-      .neq("id", profile?.id)
-      .order("created_at", { ascending: false });
-
-    if (users) setAllUsers(users as Profile[]);
-
-    // Fetch all polls
-    const { data: polls } = await supabase
-      .from("polls")
-      .select("*, profiles(full_name)")
-      .order("created_at", { ascending: false });
-
-    if (polls) setAllPolls(polls as Poll[]);
-    
-    setLoadingData(false);
+      // Fetch all polls
+      const polls = await apiClient.getPolls();
+      setAllPolls(polls as Poll[]);
+    } catch (error) {
+      console.error("Error fetching data:", error);
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: "No se pudieron cargar los datos. Verifique que el servidor backend esté funcionando.",
+      });
+    } finally {
+      setLoadingData(false);
+    }
   };
 
-  const updateUserStatus = async (userId: string, status: "active" | "suspended") => {
-    const { error } = await supabase
-      .from("profiles")
-      .update({ status })
-      .eq("id", userId);
+  const updateUserStatus = async (userId: number, status: "active" | "suspended") => {
+    try {
+      await apiClient.updateUserStatus(userId, status);
 
-    if (error) {
-      toast({ variant: "destructive", title: "Error", description: error.message });
-      return;
+      toast({
+        title: status === "active" ? "Usuario aprobado" : "Usuario suspendido",
+        description: status === "active" 
+          ? "El usuario ahora puede acceder al sistema" 
+          : "El usuario ha sido suspendido",
+      });
+      fetchData();
+    } catch (error: any) {
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: error.message || "No se pudo actualizar el usuario",
+      });
     }
-
-    toast({
-      title: status === "active" ? "Usuario aprobado" : "Usuario suspendido",
-      description: status === "active" 
-        ? "El usuario ahora puede acceder al sistema" 
-        : "El usuario ha sido suspendido",
-    });
-    fetchData();
   };
 
-  const togglePollStatus = async (pollId: string, isActive: boolean) => {
-    const { error } = await supabase
-      .from("polls")
-      .update({ is_active: !isActive })
-      .eq("id", pollId);
+  const togglePollStatus = async (pollId: number, isActive: boolean) => {
+    try {
+      await apiClient.updatePoll(pollId, { is_active: !isActive });
 
-    if (error) {
-      toast({ variant: "destructive", title: "Error", description: error.message });
-      return;
+      toast({
+        title: isActive ? "Votación desactivada" : "Votación activada",
+      });
+      fetchData();
+    } catch (error: any) {
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: error.message || "No se pudo actualizar la votación",
+      });
     }
-
-    toast({
-      title: isActive ? "Votación desactivada" : "Votación activada",
-    });
-    fetchData();
   };
 
   const getStatusBadge = (status: string) => {
@@ -445,7 +442,7 @@ export default function AdminDashboard() {
                             </span>
                           </div>
                           <p className="text-sm text-muted-foreground">
-                            Creada por: {poll.profiles?.full_name || "Desconocido"} • 
+                            Creada por: {poll.creator_name || "Desconocido"} • 
                             Cierre: {format(new Date(poll.end_date), "dd MMM yyyy", { locale: es })}
                           </p>
                         </div>
